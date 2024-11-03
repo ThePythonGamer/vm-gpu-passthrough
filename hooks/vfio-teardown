@@ -20,10 +20,17 @@
 ## testing them for us!                            ## ## in your terminal  ##
 ##################################################### #######################
 
-################################# Variables #################################
+################################# Configuration #############################
 
 ## Adds current time to var for use in echo for a cleaner log and script ##
 DATE=$(date +"%m/%d/%Y %R:%S :")
+
+## A custom command to (re)start the display manager (or equivalent) ##
+## Be careful what is set here as it will BE RUN AS ROOT ##
+function start_display_manager_override {
+    #/usr/bin/sudo --user=1000 --group=1000 start-display-manager
+    /usr/bin/false
+}
 
 ################################## Script ###################################
 
@@ -64,21 +71,24 @@ if  grep -q "true" "/tmp/vfio-is-amd" ; then
 fi
 
 ## Restart Display Manager ##
-input="/tmp/vfio-store-display-manager"
-while read -r DISPMGR; do
-  if command -v systemctl; then
+if start_display_manager_override; then
+    echo "$DATE Display manager has been restarted with override function, skipping normal restarting procedure"
+else
+  input="/tmp/vfio-store-display-manager"
+  while read -r DISPMGR; do
+    if command -v systemctl; then
+      ## Make sure the variable got collected ##
+      echo "$DATE Var has been collected from file: $DISPMGR"
 
-    ## Make sure the variable got collected ##
-    echo "$DATE Var has been collected from file: $DISPMGR"
+      systemctl start "$DISPMGR.service"
 
-    systemctl start "$DISPMGR.service"
-
-  else
-    if command -v sv; then
-      sv start "$DISPMGR"
+    else
+      if command -v sv; then
+        sv start "$DISPMGR"
+      else
     fi
-  fi
-done < "$input"
+  done < "$input"
+fi
 
 ############################################################################################################
 ## Rebind VT consoles (adapted and modernised from https://www.kernel.org/doc/Documentation/fb/fbcon.txt) ##

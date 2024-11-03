@@ -20,7 +20,7 @@
 ## testing them for us!                            ## ## in your terminal  ##
 ##################################################### #######################
 
-################################# Variables #################################
+################################# Configuration #############################
 
 ## Adds current time to var for use in echo for a cleaner log and script ##
 DATE=$(date +"%m/%d/%Y %R:%S :")
@@ -28,12 +28,25 @@ DATE=$(date +"%m/%d/%Y %R:%S :")
 ## Sets dispmgr var as null ##
 DISPMGR="null"
 
+## A custom command to stop the display manager (or equivalent) ##
+## Be careful what is set here as it will BE RUN AS ROOT ##
+function stop_display_manager_override {
+    #/usr/bin/sudo --user=1000 --group=1000 stop-display-manager
+    /usr/bin/false
+}
+
 ################################## Script ###################################
 
 echo "$DATE Beginning of Startup!"
 
 
 function stop_display_manager_if_running {
+    ## Run the override first, if it succeeded, we have stopped the display manager ##
+    if stop_display_manager_override; then
+        echo "$DATE Display manager has been stopped with override function, skipping normal stopping procedure"
+        return 0
+    fi
+
     ## Get display manager on systemd based distros ##
     if [[ -x /run/systemd/system ]] && echo "$DATE Distro is using Systemd"; then
         DISPMGR="$(grep 'ExecStart=' /etc/systemd/system/display-manager.service | awk -F'/' '{print $(NF-0)}')"
