@@ -1,0 +1,7 @@
+# /etc/udev/rules.d/99-block-dualsense-audio.rules
+
+# Disable host authorization for the DualSense wireless controller's audio interfaces (Class 01)
+# This prevents the host from registering any sound card for it, avoiding volume/routing glitches.
+# The HID gamepad interface (Class 03) remains authorized, and the raw USB device remains fully
+# accessible to QEMU for VM passthrough (enabling HD haptics inside Windows).
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0ce6", ATTR{bInterfaceClass}=="01", ATTR{authorized}="0"

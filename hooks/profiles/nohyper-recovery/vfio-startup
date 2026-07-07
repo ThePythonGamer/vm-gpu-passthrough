@@ -166,62 +166,14 @@ for i in $(seq 0 15); do
 done
 echo "$DATE CPU governor set to 'performance'."
 
-## Hugepages: fixed 32GB 2MB hugepage reservation for VM ##
-# win11-outlawsHV.xml now requests 32GB RAM backed by explicit 2MB hugepages.
-# Do not rewrite the inactive libvirt XML here; if the host cannot reserve the
-# full pool, abort cleanly before QEMU starts so the VM definition stays stable.
-HP_TARGET=16384           # 16384 x 2MB = 32GB
-HP_PATH=/sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
-
-echo "$DATE Compacting host memory to reduce fragmentation before hugepage allocation..."
-# compact_memory is asynchronous — poll HugePages_Free until it stops rising.
-echo 1 > /proc/sys/vm/compact_memory
-prev_free="-1"
-for i in $(seq 1 12); do
-    sleep 5
-    curr_free=$(grep -m1 'HugePages_Free' /proc/meminfo | awk '{print $2}')
-    echo "$DATE  [compact pass $i] HugePages_Free=${curr_free}"
-    if [ "$curr_free" = "$prev_free" ] && [ "$i" -ge 2 ]; then
-        echo "$DATE  Compaction stabilised after $((i * 5))s."
-        break
-    fi
-    prev_free="$curr_free"
-done
-
-echo "$DATE Requesting ${HP_TARGET} hugepages..."
-echo "$HP_TARGET" > "$HP_PATH"
-sleep 3
-HP_ACTUAL=$(cat "$HP_PATH")
-echo "$DATE First pass: ${HP_ACTUAL} / ${HP_TARGET} pages allocated."
-
-# Second compaction pass if we fell short.
-if [ "$HP_ACTUAL" -lt "$HP_TARGET" ]; then
-    echo "$DATE Running second compaction pass and retrying..."
-    echo 1 > /proc/sys/vm/compact_memory
-    sleep 10
-    echo "$HP_TARGET" > "$HP_PATH"
-    sleep 3
-    HP_ACTUAL=$(cat "$HP_PATH")
-    echo "$DATE Second pass: ${HP_ACTUAL} / ${HP_TARGET} pages allocated."
-fi
-
-HP_ACTUAL_KiB=$(( HP_ACTUAL * 2048 ))  # 1 hugepage = 2MB = 2048 KiB
-echo "$DATE Final: ${HP_ACTUAL} hugepages = $(( HP_ACTUAL * 2 / 1024 ))GB."
-
-if [ "$HP_ACTUAL" -lt "$HP_TARGET" ]; then
-    echo "$DATE FATAL ERROR: Only ${HP_ACTUAL} / ${HP_TARGET} hugepages allocated."
-    echo "$DATE Releasing hugepage pool and aborting VM startup to avoid partial RAM/XML state."
-    echo 0 > "$HP_PATH"
-    rm -f /tmp/vfio-restore-vm-ram
-    echo madvise > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true
-    echo always > /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null || true
-    systemctl isolate graphical.target
-    exit 1
-else
-    echo never > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true
-    rm -f /tmp/vfio-restore-vm-ram
-    echo "$DATE Full 32GB hugepage allocation. VM gets fixed RAM with 100% hugepage coverage."
-fi
+## No-hugepage recovery mode ##
+# This profile is intended for win11_nohyper.xml. It deliberately avoids
+# reserving hugepages or rewriting the inactive libvirt domain at startup.
+echo "$DATE Nohyper recovery mode: skipping hugepage allocation and VM XML rewrites."
+echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages 2>/dev/null || true
+rm -f /tmp/vfio-restore-vm-ram
+echo madvise > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true
+echo always > /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null || true
 
 ## Auto-start VNC Server for secondary access
 echo "$DATE Checking/Starting VNC Remote..."

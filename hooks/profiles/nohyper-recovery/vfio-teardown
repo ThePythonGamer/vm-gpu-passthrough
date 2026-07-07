@@ -99,11 +99,23 @@ for i in $(seq 0 23); do
 done
 echo "$DATE CPU governor restored to 'powersave'."
 
-## Hugepages: Release fixed VM pool ##
+## Hugepages: Release pool and restore VM RAM to 48GB for next session ##
 echo "$DATE Releasing hugepages..."
 echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
 echo "$DATE Hugepages released."
-rm -f /tmp/vfio-restore-vm-ram
+
+# If startup shrunk VM RAM to match partial hugepage allocation, restore it now.
+if [ -f /tmp/vfio-restore-vm-ram ]; then
+    ORIG_RAM=$(cat /tmp/vfio-restore-vm-ram)
+    rm -f /tmp/vfio-restore-vm-ram
+    echo "$DATE Restoring VM RAM to ${ORIG_RAM} KiB (48GB) for next session..."
+    virsh dumpxml --inactive win11 2>/dev/null \
+        | sed "s|<memory unit='KiB'>[0-9]*</memory>|<memory unit='KiB'>${ORIG_RAM}</memory>|" \
+        | sed "s|<currentMemory unit='KiB'>[0-9]*</currentMemory>|<currentMemory unit='KiB'>${ORIG_RAM}</currentMemory>|" \
+        | virsh define /dev/stdin >> /var/log/libvirt/custom_hooks.log 2>&1 \
+        && echo "$DATE VM RAM restored to 48GB." \
+        || echo "$DATE WARNING: Failed to restore VM RAM — check XML manually."
+fi
 
 echo "$DATE Restarting CoolerControl for Host mode..."
 systemctl --no-block restart coolercontrold.service

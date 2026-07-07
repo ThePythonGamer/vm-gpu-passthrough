@@ -1,0 +1,10 @@
+# /etc/udev/rules.d/99-vm-usb-hotplug.rules
+
+# Xbox/DualSense Controller Port (Bus 1, Port 4)
+ACTION=="add", SUBSYSTEM=="usb", KERNEL=="1-4", RUN+="/usr/local/bin/usb-auto-attach.sh 1 4 add"
+ACTION=="remove", SUBSYSTEM=="usb", KERNEL=="1-4", RUN+="/usr/local/bin/usb-auto-attach.sh 1 4 remove"
+
+
+# NVMe Drive Port (Bus 2, Port 1) - High Speed
+ACTION=="add", SUBSYSTEM=="usb", KERNEL=="2-1", RUN+="/usr/local/bin/usb-auto-attach.sh 2 1 add"
+ACTION=="remove", SUBSYSTEM=="usb", KERNEL=="2-1", RUN+="/usr/local/bin/usb-auto-attach.sh 2 1 remove"

@@ -3,18 +3,73 @@
 OBJECT="$1"
 OPERATION="$2"
 
-if [[ $OBJECT == "win10" ]]; then
+echo "$(date) QEMU Hook: $OBJECT $OPERATION" >> /var/log/libvirt/custom_hooks.log
+
+if [[ $OBJECT == "win11" ]]; then
 	case "$OPERATION" in
         	"prepare")
-                systemctl start libvirt-nosleep@"$OBJECT"  2>&1 | tee -a /var/log/libvirt/custom_hooks.log
+                systemctl start libvirt-nosleep@"$OBJECT" 2>&1 | tee -a /var/log/libvirt/custom_hooks.log
                 /usr/local/bin/vfio-startup 2>&1 | tee -a /var/log/libvirt/custom_hooks.log
                 ;;
 
+                "started")
+                # Automatically enforce offline firewall rules AFTER libvirt sets up its NAT
+                /usr/local/bin/vm-net-off >> /var/log/libvirt/custom_hooks.log 2>&1
+
+                # AUDIO AUTOMATION - EQ handled by PipeWire filter-chain (VM-only)
+                (
+                    export USER_ID=1000
+                    export XDG_RUNTIME_DIR=/run/user/$USER_ID
+                    export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$USER_ID/bus
+                    
+                    echo "$(date) Starting Audio Automation for $OBJECT..." >> /var/log/libvirt/custom_hooks.log
+                    
+                    # Activate filter-chain EQ by symlinking into pipewire conf.d
+                    EQ_CONF="/usr/local/share/vfio/snek-eq.conf"
+                    PW_CONFD="/home/snekux/.config/pipewire/pipewire.conf.d"
+                    mkdir -p "$PW_CONFD"
+                    ln -sf "$EQ_CONF" "$PW_CONFD/snek-eq.conf"
+                    
+                    # Restart PipeWire to load the filter-chain
+                    sudo -u snekux -E systemctl --user restart pipewire.service
+                    sleep 2
+                    
+                    # Set the filter-chain EQ sink as the default so Scream routes through it
+                    SNEK_EQ_ID=$(sudo -u snekux -E pw-cli ls Node 2>/dev/null \
+                        | grep -B5 'effect_input.snek_eq' \
+                        | grep -oP 'id \K[0-9]+' | head -1)
+                    if [ -n "$SNEK_EQ_ID" ]; then
+                        sudo -u snekux -E wpctl set-default "$SNEK_EQ_ID" >> /var/log/libvirt/custom_hooks.log 2>&1
+                        echo "$(date) Set snek-EQ (node $SNEK_EQ_ID) as default sink." >> /var/log/libvirt/custom_hooks.log
+                    else
+                        echo "$(date) WARNING: Could not find snek-EQ filter-chain node!" >> /var/log/libvirt/custom_hooks.log
+                    fi
+                    
+                    # Bump USB Audio Speakers volume to 100% and explicitly UNMUTE them
+                    USB_AUDIO_ID=$(sudo -u snekux -E wpctl status | grep "USB Audio Speakers" | grep -oP '\d+' | head -1)
+                    if [ -n "$USB_AUDIO_ID" ]; then
+                        sudo -u snekux -E wpctl set-volume "$USB_AUDIO_ID" 1.0 >> /var/log/libvirt/custom_hooks.log 2>&1
+                        sudo -u snekux -E wpctl set-mute "$USB_AUDIO_ID" 0 >> /var/log/libvirt/custom_hooks.log 2>&1
+                        echo "$(date) Set USB Audio Speakers (node $USB_AUDIO_ID) to 100% volume and unmuted." >> /var/log/libvirt/custom_hooks.log
+                    fi
+                    
+                    # Force kill EasyEffects so it stops hijacking the Scream audio stream!
+                    pkill -u snekux easyeffects || true
+                    
+                    # Start Scream receiver
+                    # -i virbr0 specifies the interface to listen on
+                    sudo -u snekux -E scream -i virbr0 >> /var/log/libvirt/custom_hooks.log 2>&1 &
+                    
+                    echo "$(date) Audio Automation started." >> /var/log/libvirt/custom_hooks.log
+                ) &
+                ;;
+
                 "release")
-                systemctl stop libvirt-nosleep@"$OBJECT"  2>&1 | tee -a /var/log/libvirt/custom_hooks.log  
+                # Audio: Stop Scream and deactivate filter-chain EQ
+                pkill -u snekux scream
+                rm -f /home/snekux/.config/pipewire/pipewire.conf.d/snek-eq.conf
+                systemctl stop libvirt-nosleep@"$OBJECT" 2>&1 | tee -a /var/log/libvirt/custom_hooks.log  
                 /usr/local/bin/vfio-teardown 2>&1 | tee -a /var/log/libvirt/custom_hooks.log
                 ;;
 	esac
 fi
-
-

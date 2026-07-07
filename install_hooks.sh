@@ -26,6 +26,10 @@ cp hooks/vfio-startup /usr/local/bin/vfio-startup
 cp hooks/vfio-teardown /usr/local/bin/vfio-teardown
 cp hooks/qemu /etc/libvirt/hooks/qemu
 
+# Install PipeWire filter-chain EQ config (used by qemu hook)
+mkdir -p /usr/local/share/vfio
+cp hooks/snek-eq.conf /usr/local/share/vfio/snek-eq.conf
+
 chmod +x /usr/local/bin/vfio-startup
 chmod +x /usr/local/bin/vfio-teardown
 chmod +x /etc/libvirt/hooks/qemu
