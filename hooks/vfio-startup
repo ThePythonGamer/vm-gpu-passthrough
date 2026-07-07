@@ -32,69 +32,51 @@ DISPMGR="null"
 
 echo "$DATE Beginning of Startup!"
 
+##Stop Display Manager ##
+echo "$DATE Stopping Display Manager and Graphical Sessions..."
+if systemctl is-active --quiet sddm.service; then
+   systemctl stop sddm.service
+fi
+systemctl isolate multi-user.target
 
-function stop_display_manager_if_running {
-    ## Get display manager on systemd based distros ##
-    if [[ -x /run/systemd/system ]] && echo "$DATE Distro is using Systemd"; then
-        DISPMGR="$(grep 'ExecStart=' /etc/systemd/system/display-manager.service | awk -F'/' '{print $(NF-0)}')"
-        echo "$DATE Display Manager = $DISPMGR"
+# Terminate all graphical sessions on seat0 to gracefully kill KDE Wayland
+loginctl terminate-seat seat0 2>/dev/null || true
 
-        ## Stop display manager using systemd ##
-        if systemctl is-active --quiet "$DISPMGR.service"; then
-            grep -qsF "$DISPMGR" "/tmp/vfio-store-display-manager" || echo "$DISPMGR" >/tmp/vfio-store-display-manager
-            systemctl stop "$DISPMGR.service"
-            systemctl isolate multi-user.target
-        fi
-
-        while systemctl is-active --quiet "$DISPMGR.service"; do
-            sleep "1"
-        done
-
-        return
-
+echo "$DATE Waiting for user sessions and Wayland to fully terminate..."
+max_wait=15
+count=0
+# logind revokes the DRM FDs instantly, so lsof won't work. We must wait for the actual compositor to die.
+while pidof kwin_wayland plasmashell Xwayland >/dev/null 2>&1; do
+    sleep 1
+    count=$((count+1))
+    if [ $count -ge $max_wait ]; then
+        echo "$DATE Timeout reached! Force killing Wayland processes..."
+        killall -9 kwin_wayland plasmashell Xwayland >/dev/null 2>&1
+        
+        # Explicitly kill aggressive apps that survive the KDE session crash and migrate to the VNC server
+        echo "$DATE Killing lingering user applications (Steam, Discord)..."
+        pkill -u snekux -f -i "steam" >/dev/null 2>&1 || true
+        pkill -u snekux -f -i "discord" >/dev/null 2>&1 || true
+        
+        sleep 2
+        break
     fi
+done
 
-}
-
-function kde-clause {
-
-    echo "$DATE Display Manager = display-manager"
-
-    ## Stop display manager using systemd ##
-    if systemctl is-active --quiet "display-manager.service"; then
-    
-        grep -qsF "display-manager" "/tmp/vfio-store-display-manager"  || echo "display-manager" >/tmp/vfio-store-display-manager
-        systemctl stop "display-manager.service"
-    fi
-
-        while systemctl is-active --quiet "display-manager.service"; do
-                sleep 2
-        done
-
-    return
-
-}
-
-####################################################################################################################
-## Checks to see if your running KDE. If not it will run the function to collect your display manager.            ##
-## Have to specify the display manager because kde is weird and uses display-manager even though it returns sddm. ##
-####################################################################################################################
-
-if pgrep -l "plasma" | grep "plasmashell"; then
-    echo "$DATE Display Manager is KDE, running KDE clause!"
-    kde-clause
-    else
-        echo "$DATE Display Manager is not KDE!"
-        stop_display_manager_if_running
+# Secondary safety check to ensure absolutely no processes are holding the GPU before we unload
+if [ -n "$(lsof /dev/nvidia* /dev/dri/card* /dev/dri/renderD* 2>/dev/null)" ]; then
+    echo "$DATE Killing lingering unknown processes using the GPU..."
+    fuser -k -9 /dev/nvidia* /dev/dri/card* /dev/dri/renderD* >/dev/null 2>&1
+    sleep 1
 fi
 
-## Unbind EFI-Framebuffer ##
-if test -e "/tmp/vfio-is-nvidia"; then
-    rm -f /tmp/vfio-is-nvidia
-    else
-        test -e "/tmp/vfio-is-amd"
-        rm -f /tmp/vfio-is-amd
+# Unbind EFI-framebuffer
+if [ -d "/sys/bus/platform/drivers/efi-framebuffer" ]; then
+    echo "efi-framebuffer.0" > /sys/bus/platform/drivers/efi-framebuffer/unbind 2>/dev/null || true
 fi
+
+## Clear previous state files ##
+rm -f /tmp/vfio-is-nvidia /tmp/vfio-is-amd /tmp/vfio-bound-consoles
 
 sleep "1"
 
@@ -119,17 +101,34 @@ sleep "1"
 
 if lspci -nn | grep -e VGA | grep -s NVIDIA ; then
     echo "$DATE System has an NVIDIA GPU"
-    grep -qsF "true" "/tmp/vfio-is-nvidia" || echo "true" >/tmp/vfio-is-nvidia
-    echo efi-framebuffer.0 > /sys/bus/platform/drivers/efi-framebuffer/unbind
+    echo "true" > /tmp/vfio-is-nvidia
 
     ## Unload NVIDIA GPU drivers ##
-    modprobe -r nvidia_uvm
-    modprobe -r nvidia_drm
-    modprobe -r nvidia_modeset
-    modprobe -r nvidia
-    modprobe -r i2c_nvidia_gpu
-    modprobe -r drm_kms_helper
-    modprobe -r drm
+    echo "$DATE Unloading NVIDIA drivers..."
+    unload_success=0
+    for i in {1..15}; do
+        if modprobe -r nvidia_drm nvidia_modeset nvidia_uvm nvidia i2c_nvidia_gpu >/dev/null 2>&1; then
+            unload_success=1
+            break
+        else
+            echo "$DATE Drivers still in use. Force killing lingering apps (Attempt $i/15)..."
+            fuser -k -9 /dev/nvidia* /dev/dri/card* /dev/dri/renderD* >/dev/null 2>&1
+            sleep 2
+        fi
+    done
+
+    if [ "$unload_success" -eq 0 ]; then
+        echo "$DATE FATAL ERROR: Failed to unload NVIDIA drivers."
+        echo "$DATE Processes still using GPU:"
+        lsof /dev/nvidia* /dev/dri/card* /dev/dri/renderD*
+        echo "$DATE Aborting VM startup to prevent host kernel panic!"
+        systemctl isolate graphical.target
+        exit 1
+    fi
+
+    ## Detach RTX 4080 from host drivers ##
+    virsh nodedev-detach pci_0000_01_00_0
+    virsh nodedev-detach pci_0000_01_00_1
 
     echo "$DATE NVIDIA GPU Drivers Unloaded"
 fi
@@ -152,5 +151,35 @@ fi
 modprobe vfio
 modprobe vfio_pci
 modprobe vfio_iommu_type1
+
+## Host CPU Isolation ##
+# Isolate P-cores (0-15) by moving host processes to E-cores (16-23)
+echo "$DATE Isolating P-cores..."
+systemctl set-property --runtime --all user.slice AllowedCPUs=16-23
+systemctl set-property --runtime --all system.slice AllowedCPUs=16-23
+systemctl set-property --runtime --all init.scope AllowedCPUs=16-23
+
+## CPU Governor: Switch VM cores to performance for full turbo boost ##
+echo "$DATE Setting CPU governor to 'performance' for VM cores (0-15)..."
+for i in $(seq 0 15); do
+    echo "performance" > /sys/devices/system/cpu/cpu${i}/cpufreq/scaling_governor
+done
+echo "$DATE CPU governor set to 'performance'."
+
+## No-hugepage recovery mode ##
+# This profile is intended for win11_nohyper.xml. It deliberately avoids
+# reserving hugepages or rewriting the inactive libvirt domain at startup.
+echo "$DATE Nohyper recovery mode: skipping hugepage allocation and VM XML rewrites."
+echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages 2>/dev/null || true
+rm -f /tmp/vfio-restore-vm-ram
+echo madvise > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true
+echo always > /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null || true
+
+## Auto-start VNC Server for secondary access
+echo "$DATE Checking/Starting VNC Remote..."
+su - snekux -c "/usr/local/bin/vnc-remote start"
+
+echo "$DATE Restarting CoolerControl for VM mode..."
+systemctl --no-block restart coolercontrold.service
 
 echo "$DATE End of Startup!"

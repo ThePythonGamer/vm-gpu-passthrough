@@ -39,13 +39,14 @@ if grep -q "true" "/tmp/vfio-is-nvidia" ; then
     ## Load NVIDIA drivers ##
     echo "$DATE Loading NVIDIA GPU Drivers"
     
-    modprobe drm
-    modprobe drm_kms_helper
-    modprobe i2c_nvidia_gpu
-    modprobe nvidia
-    modprobe nvidia_modeset
+    virsh nodedev-reattach pci_0000_01_00_0
+    virsh nodedev-reattach pci_0000_01_00_1
+
     modprobe nvidia_drm
+    modprobe nvidia_modeset
     modprobe nvidia_uvm
+    modprobe nvidia
+    modprobe i2c_nvidia_gpu
 
     echo "$DATE NVIDIA GPU Drivers Loaded"
 fi
@@ -63,37 +64,60 @@ if  grep -q "true" "/tmp/vfio-is-amd" ; then
     echo "$DATE AMD GPU Drivers Loaded"
 fi
 
-## Restart Display Manager ##
-input="/tmp/vfio-store-display-manager"
-while read -r DISPMGR; do
-  if command -v systemctl; then
-
-    ## Make sure the variable got collected ##
-    echo "$DATE Var has been collected from file: $DISPMGR"
-
-    systemctl start "$DISPMGR.service"
-
-  else
-    if command -v sv; then
-      sv start "$DISPMGR"
-    fi
-  fi
-done < "$input"
-
 ############################################################################################################
 ## Rebind VT consoles (adapted and modernised from https://www.kernel.org/doc/Documentation/fb/fbcon.txt) ##
 ############################################################################################################
 
 input="/tmp/vfio-bound-consoles"
-while read -r consoleNumber; do
-  if test -x /sys/class/vtconsole/vtcon"${consoleNumber}"; then
-      if [ "$(grep -c "frame buffer" "/sys/class/vtconsole/vtcon${consoleNumber}/name")" \
-           = 1 ]; then
-    echo "$DATE Rebinding console ${consoleNumber}"
-	  echo 1 > /sys/class/vtconsole/vtcon"${consoleNumber}"/bind
+if [ -f "$input" ]; then
+    while read -r consoleNumber; do
+      if test -x /sys/class/vtconsole/vtcon"${consoleNumber}"; then
+          if [ "$(grep -c "frame buffer" "/sys/class/vtconsole/vtcon${consoleNumber}/name")" \
+               = 1 ]; then
+        echo "$DATE Rebinding console ${consoleNumber}"
+          echo 1 > /sys/class/vtconsole/vtcon"${consoleNumber}"/bind
+          fi
       fi
-  fi
-done < "$input"
+    done < "$input"
+fi
 
+## Restart Display Manager ##
+echo "$DATE Restarting Display Manager"
+systemctl isolate graphical.target
+
+## Restore Host CPU Resources ##
+# Restore all cores to the host
+echo "$DATE Restoring all CPU cores..."
+systemctl set-property --runtime --all user.slice AllowedCPUs=0-23
+systemctl set-property --runtime --all system.slice AllowedCPUs=0-23
+systemctl set-property --runtime --all init.scope AllowedCPUs=0-23
+
+## CPU Governor: Restore all cores to powersave ##
+echo "$DATE Restoring CPU governor to 'powersave' for all cores..."
+for i in $(seq 0 23); do
+    echo "powersave" > /sys/devices/system/cpu/cpu${i}/cpufreq/scaling_governor
+done
+echo "$DATE CPU governor restored to 'powersave'."
+
+## Hugepages: Release pool and restore VM RAM to 48GB for next session ##
+echo "$DATE Releasing hugepages..."
+echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
+echo "$DATE Hugepages released."
+
+# If startup shrunk VM RAM to match partial hugepage allocation, restore it now.
+if [ -f /tmp/vfio-restore-vm-ram ]; then
+    ORIG_RAM=$(cat /tmp/vfio-restore-vm-ram)
+    rm -f /tmp/vfio-restore-vm-ram
+    echo "$DATE Restoring VM RAM to ${ORIG_RAM} KiB (48GB) for next session..."
+    virsh dumpxml --inactive win11 2>/dev/null \
+        | sed "s|<memory unit='KiB'>[0-9]*</memory>|<memory unit='KiB'>${ORIG_RAM}</memory>|" \
+        | sed "s|<currentMemory unit='KiB'>[0-9]*</currentMemory>|<currentMemory unit='KiB'>${ORIG_RAM}</currentMemory>|" \
+        | virsh define /dev/stdin >> /var/log/libvirt/custom_hooks.log 2>&1 \
+        && echo "$DATE VM RAM restored to 48GB." \
+        || echo "$DATE WARNING: Failed to restore VM RAM — check XML manually."
+fi
+
+echo "$DATE Restarting CoolerControl for Host mode..."
+systemctl --no-block restart coolercontrold.service
 
 echo "$DATE End of Teardown!"
