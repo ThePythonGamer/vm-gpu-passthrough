@@ -25,6 +25,33 @@
 ## Adds current time to var for use in echo for a cleaner log and script ##
 DATE=$(date +"%m/%d/%Y %R:%S :")
 
+GPU_PCI="0000:01:00.0"
+GPU_AUDIO_PCI="0000:01:00.1"
+
+clear_driver_override() {
+    local pci="$1"
+
+    if [ -e "/sys/bus/pci/devices/${pci}/driver_override" ]; then
+        echo > "/sys/bus/pci/devices/${pci}/driver_override"
+    fi
+}
+
+unbind_if_bound() {
+    local pci="$1"
+
+    if [ -L "/sys/bus/pci/devices/${pci}/driver" ]; then
+        echo "$pci" > "/sys/bus/pci/devices/${pci}/driver/unbind" 2>/dev/null || true
+    fi
+}
+
+probe_pci_device() {
+    local pci="$1"
+
+    if [ -e "/sys/bus/pci/devices/${pci}" ]; then
+        echo "$pci" > /sys/bus/pci/drivers_probe 2>/dev/null || true
+    fi
+}
+
 ################################## Script ###################################
 
 echo "$DATE Beginning of Teardown!"
@@ -38,15 +65,23 @@ if grep -q "true" "/tmp/vfio-is-nvidia" ; then
 
     ## Load NVIDIA drivers ##
     echo "$DATE Loading NVIDIA GPU Drivers"
-    
-    virsh nodedev-reattach pci_0000_01_00_0
-    virsh nodedev-reattach pci_0000_01_00_1
 
-    modprobe nvidia_drm
+    ## Avoid virsh from inside the libvirt release hook. Rebind via sysfs so
+    ## teardown cannot deadlock libvirt while destroy/shutdown is completing.
+    unbind_if_bound "$GPU_PCI"
+    unbind_if_bound "$GPU_AUDIO_PCI"
+    clear_driver_override "$GPU_PCI"
+    clear_driver_override "$GPU_AUDIO_PCI"
+
+    modprobe nvidia
     modprobe nvidia_modeset
     modprobe nvidia_uvm
-    modprobe nvidia
+    modprobe nvidia_drm
     modprobe i2c_nvidia_gpu
+    modprobe snd_hda_intel
+
+    probe_pci_device "$GPU_PCI"
+    probe_pci_device "$GPU_AUDIO_PCI"
 
     echo "$DATE NVIDIA GPU Drivers Loaded"
 fi
@@ -81,6 +116,10 @@ if [ -f "$input" ]; then
     done < "$input"
 fi
 
+## Stop VNC lifeline now that the host display is coming back ##
+echo "$DATE Stopping VNC Remote"
+su - snekux -c "/usr/local/bin/vnc-remote stop" || true
+
 ## Restart Display Manager ##
 echo "$DATE Restarting Display Manager"
 systemctl isolate graphical.target
@@ -104,17 +143,11 @@ echo "$DATE Releasing hugepages..."
 echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
 echo "$DATE Hugepages released."
 
-# If startup shrunk VM RAM to match partial hugepage allocation, restore it now.
+# Avoid virsh calls from teardown. The nohyper recovery startup does not rewrite
+# VM RAM, so this stale marker can only make release cleanup less reliable.
 if [ -f /tmp/vfio-restore-vm-ram ]; then
-    ORIG_RAM=$(cat /tmp/vfio-restore-vm-ram)
     rm -f /tmp/vfio-restore-vm-ram
-    echo "$DATE Restoring VM RAM to ${ORIG_RAM} KiB (48GB) for next session..."
-    virsh dumpxml --inactive win11 2>/dev/null \
-        | sed "s|<memory unit='KiB'>[0-9]*</memory>|<memory unit='KiB'>${ORIG_RAM}</memory>|" \
-        | sed "s|<currentMemory unit='KiB'>[0-9]*</currentMemory>|<currentMemory unit='KiB'>${ORIG_RAM}</currentMemory>|" \
-        | virsh define /dev/stdin >> /var/log/libvirt/custom_hooks.log 2>&1 \
-        && echo "$DATE VM RAM restored to 48GB." \
-        || echo "$DATE WARNING: Failed to restore VM RAM — check XML manually."
+    echo "$DATE Removed stale VM RAM restore marker."
 fi
 
 echo "$DATE Restarting CoolerControl for Host mode..."
